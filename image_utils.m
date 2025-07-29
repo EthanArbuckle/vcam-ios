@@ -3,10 +3,7 @@
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
 
-@interface BWNodeOutput : NSObject
-@property (nonatomic, readonly) unsigned int mediaType;
-@end
-
+// This can be a static image or video file
 static NSString *const kReplacementMediaPath = @"/var/mobile/Media/DCIM/test.mp4";
 
 typedef enum {
@@ -30,26 +27,26 @@ static void createPixelBufferPool(size_t width, size_t height) {
     if (pixelBufferPool && cachedWidth == width && cachedHeight == height) {
         return;
     }
-    
+
     if (pixelBufferPool) {
         CVPixelBufferPoolRelease(pixelBufferPool);
         pixelBufferPool = NULL;
     }
-    
+
     NSDictionary *poolAttributes = @{
-        (NSString*)kCVPixelBufferPoolMinimumBufferCountKey: @3,
-        (NSString*)kCVPixelBufferPoolMaximumBufferAgeKey: @(5.0)
+        (NSString *)kCVPixelBufferPoolMinimumBufferCountKey: @3,
+        (NSString *)kCVPixelBufferPoolMaximumBufferAgeKey: @(5.0)
     };
-    
+
     NSDictionary *pixelBufferAttributes = @{
-        (NSString*)kCVPixelBufferCGImageCompatibilityKey: @YES,
-        (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
-        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (NSString*)kCVPixelBufferWidthKey: @(width),
-        (NSString*)kCVPixelBufferHeightKey: @(height),
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
+        (NSString *)kCVPixelBufferCGImageCompatibilityKey: @YES,
+        (NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
+        (NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (NSString *)kCVPixelBufferWidthKey: @(width),
+        (NSString *)kCVPixelBufferHeightKey: @(height),
+        (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
     };
-    
+
     if (CVPixelBufferPoolCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)poolAttributes, (__bridge CFDictionaryRef)pixelBufferAttributes, &pixelBufferPool) == kCVReturnSuccess) {
         cachedWidth = width;
         cachedHeight = height;
@@ -64,7 +61,7 @@ static void loadReplacementMedia(void) {
     if (![[NSFileManager defaultManager] fileExistsAtPath:kReplacementMediaPath]) {
         return;
     }
-    
+
     NSString *extension = [[kReplacementMediaPath pathExtension] lowercaseString];
     if ([extension isEqualToString:@"png"] || [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"]) {
         UIImage *image = [UIImage imageWithContentsOfFile:kReplacementMediaPath];
@@ -72,35 +69,35 @@ static void loadReplacementMedia(void) {
             replacementImage = CGImageRetain(image.CGImage);
             currentMode = VCamModeImage;
             resourcesLoaded = YES;
-        } 
+        }
     }
     else if ([extension isEqualToString:@"mp4"] || [extension isEqualToString:@"mov"]) {
         NSURL *videoURL = [NSURL fileURLWithPath:kReplacementMediaPath];
         AVAsset *asset = [AVAsset assetWithURL:videoURL];
-        
+
         NSError *error = nil;
         AVAssetReader *assetReader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
         if (error) {
             return;
         }
-        
+
         NSArray *videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
         if (videoTracks.count == 0) {
             return;
         }
-        
+
         AVAssetTrack *videoTrack = videoTracks[0];
         NSDictionary *outputSettings = @{ (NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA) };
         AVAssetReaderTrackOutput *videoOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
         videoOutput.alwaysCopiesSampleData = NO;
-        
+
         if (![assetReader canAddOutput:videoOutput]) {
-            return;   
+            return;
         }
 
         [assetReader addOutput:videoOutput];
         [assetReader startReading];
-        
+
         videoFrames = [[NSMutableArray alloc] init];
         int frameCount = 0;
         int maxFrames = 60;
@@ -116,10 +113,10 @@ static void loadReplacementMedia(void) {
                 [videoFrames addObject:(__bridge id)pixelBuffer];
                 frameCount++;
             }
-            
+
             CFRelease(sampleBuffer);
         }
-        
+
         if (frameCount > 0) {
             currentMode = VCamModeVideo;
             resourcesLoaded = YES;
@@ -127,7 +124,7 @@ static void loadReplacementMedia(void) {
 
         [assetReader cancelReading];
     }
-    
+
     if (sharedCIContext == NULL) {
         sharedCIContext = [CIContext context];
     }
@@ -136,9 +133,9 @@ static void loadReplacementMedia(void) {
 static CVPixelBufferRef createPixelBufferForCurrentFrame(size_t width, size_t height) {
     @synchronized(vcamLock) {
         CVPixelBufferRef result = NULL;
-        
+
         createPixelBufferPool(width, height);
-        
+
         if (pixelBufferPool) {
             if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pixelBufferPool, &result) != kCVReturnSuccess) {
                 return NULL;
@@ -146,16 +143,16 @@ static CVPixelBufferRef createPixelBufferForCurrentFrame(size_t width, size_t he
         }
         else {
             NSDictionary *pixelBufferAttributes = @{
-                (NSString*)kCVPixelBufferCGImageCompatibilityKey: @YES,
-                (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
-                (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{}
+                (NSString *)kCVPixelBufferCGImageCompatibilityKey: @YES,
+                (NSString *)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
+                (NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{}
             };
-            
+
             if (CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pixelBufferAttributes, &result) != kCVReturnSuccess) {
                 return NULL;
             }
         }
-        
+
         if (currentMode == VCamModeImage) {
             CVPixelBufferLockBaseAddress(result, 0);
 
@@ -166,15 +163,15 @@ static CVPixelBufferRef createPixelBufferForCurrentFrame(size_t width, size_t he
                 CGContextDrawImage(context, CGRectMake(0, 0, width, height), replacementImage);
                 CGContextRelease(context);
             }
-            
+
             CGColorSpaceRelease(rgbColorSpace);
             CVPixelBufferUnlockBaseAddress(result, 0);
-            
+
         }
         else if (currentMode == VCamModeVideo) {
             CVPixelBufferRef videoFrame = (__bridge CVPixelBufferRef)videoFrames[currentFrameIndex];
             currentFrameIndex = (currentFrameIndex + 1) % videoFrames.count;
-            
+
             if (CVPixelBufferGetWidth(videoFrame) == width && CVPixelBufferGetHeight(videoFrame) == height) {
                 CVPixelBufferRelease(result);
                 result = videoFrame;
@@ -182,90 +179,69 @@ static CVPixelBufferRef createPixelBufferForCurrentFrame(size_t width, size_t he
             }
             else {
                 CIImage *sourceImage = [CIImage imageWithCVPixelBuffer:videoFrame];
-                
+
                 CGFloat scaleX = (CGFloat)width / CVPixelBufferGetWidth(videoFrame);
                 CGFloat scaleY = (CGFloat)height / CVPixelBufferGetHeight(videoFrame);
                 CGFloat scale = MIN(scaleX, scaleY);
                 CGAffineTransform transform = CGAffineTransformMakeScale(scale, scale);
                 CIImage *scaledImage = [sourceImage imageByApplyingTransform:transform];
-                
+
                 if (sharedCIContext) {
                     [sharedCIContext render:scaledImage toCVPixelBuffer:result];
                 }
             }
         }
-        
+
         return result;
     }
 }
 
-%hook BWNodeOutput
-
-- (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    if (self.mediaType == 'soun') {
-        // could handle audio here
+CMSampleBufferRef createModifiedSampleBuffer(CMSampleBufferRef originalSampleBuffer) {
+    CVPixelBufferRef originalImageBuffer = CMSampleBufferGetImageBuffer(originalSampleBuffer);
+    if (originalImageBuffer == NULL) {
+        return NULL;
     }
-    
-    if (self.mediaType == 'vide') {
-        CVPixelBufferRef originalImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-        if (originalImageBuffer == NULL) {
-            %orig(sampleBuffer);
-            return;
-        }
+
+    if (!resourcesLoaded) {
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            loadReplacementMedia();
+        });
 
         if (!resourcesLoaded) {
-
-            static dispatch_once_t onceToken;
-            dispatch_once(&onceToken, ^{
-                loadReplacementMedia();
-            });
-            
-            if (!resourcesLoaded) {
-                %orig(sampleBuffer);
-                return;
-            }
-        }
-        
-        size_t width = CVPixelBufferGetWidth(originalImageBuffer);
-        size_t height = CVPixelBufferGetHeight(originalImageBuffer);
-        
-        CVPixelBufferRef replacementPixelBuffer = createPixelBufferForCurrentFrame(width, height);
-        if (replacementPixelBuffer) {
-            CFDictionaryRef propagateAttachments = CVBufferGetAttachments(originalImageBuffer, kCVAttachmentMode_ShouldPropagate);
-            if (propagateAttachments) {
-                CVBufferSetAttachments(replacementPixelBuffer, propagateAttachments, kCVAttachmentMode_ShouldPropagate);
-            }
-
-            CMSampleTimingInfo timingInfo;
-            CMSampleBufferGetSampleTimingInfo(sampleBuffer, 0, &timingInfo);
-
-            CMVideoFormatDescriptionRef newFormatDescription = NULL;
-            OSStatus formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, replacementPixelBuffer, &newFormatDescription);
-            if (formatStatus == kCVReturnSuccess && newFormatDescription) {                    
-                CMSampleBufferRef newSampleBuffer = NULL;
-                OSStatus createStatus = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, replacementPixelBuffer, newFormatDescription, &timingInfo, &newSampleBuffer);
-                if (createStatus == kCVReturnSuccess && newSampleBuffer) {
-                    CMPropagateAttachments(sampleBuffer, newSampleBuffer);
-                    
-                    %orig(newSampleBuffer);
-                    CFRelease(newSampleBuffer);
-                }
-                else {
-                    %orig(sampleBuffer);
-                }
-
-                CFRelease(newFormatDescription);
-            }
-            else {
-                %orig(sampleBuffer);
-            }
-            
-            CFRelease(replacementPixelBuffer);
-            return;
+            return NULL;
         }
     }
 
-    %orig(sampleBuffer);
-}
+    size_t width = CVPixelBufferGetWidth(originalImageBuffer);
+    size_t height = CVPixelBufferGetHeight(originalImageBuffer);
 
-%end
+    CVPixelBufferRef replacementPixelBuffer = createPixelBufferForCurrentFrame(width, height);
+    if (replacementPixelBuffer == NULL) {
+        return NULL;
+    }
+
+    CMFormatDescriptionRef newFormatDescription = NULL;
+    OSStatus formatStatus = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, replacementPixelBuffer, &newFormatDescription);
+    if (formatStatus != kCVReturnSuccess) {
+        CFRelease(replacementPixelBuffer);
+        return NULL;
+    }
+
+    CMSampleTimingInfo timingInfo;
+    CMSampleBufferGetSampleTimingInfo(originalSampleBuffer, 0, &timingInfo);
+
+    CMSampleBufferRef newSampleBuffer = NULL;
+    OSStatus createStatus = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, replacementPixelBuffer, newFormatDescription, &timingInfo, &newSampleBuffer);
+
+    CFRelease(replacementPixelBuffer);
+    CFRelease(newFormatDescription);
+
+    if (createStatus != kCVReturnSuccess) {
+        return NULL;
+    }
+
+    CMPropagateAttachments(originalSampleBuffer, newSampleBuffer);
+
+    return newSampleBuffer;
+}
