@@ -1,30 +1,13 @@
-#import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
-#import <VideoToolbox/VideoToolbox.h>
 #import <objc/runtime.h>
-
-@interface BWNode : NSObject
-@property (nonatomic, readonly) NSArray *outputs;
-@property (nonatomic, readonly) NSString *name;
-@end
-
-@interface BWNodeInput : NSObject
-@property (nonatomic, readonly) BWNode *node;
-@end
+#import <UIKit/UIKit.h>
 
 @interface BWNodeOutput : NSObject
 @property (nonatomic, readonly) unsigned int mediaType;
-@property (nonatomic, readonly) NSArray *consumers;
-- (void)emitSampleBuffer:(struct opaqueCMSampleBuffer *)arg1;
 @end
 
-@interface BWNodeConnection : NSObject
-@property (nonatomic, readonly) BWNodeInput *input;
-@property (nonatomic, readonly) BWNodeOutput *output;
-@end
-
-static NSString *const kReplacementMediaPath = @"/tmp/test.png";//@"/var/mobile/Media/DCIM/test.mp4";
+static NSString *const kReplacementMediaPath = @"/var/mobile/Media/DCIM/test.mp4";
 
 typedef enum {
     VCamModeNone = 0,
@@ -34,45 +17,75 @@ typedef enum {
 
 static VCamMode currentMode = VCamModeNone;
 static BOOL resourcesLoaded = NO;
-
 static CGImageRef replacementImage = NULL;
-
 static NSMutableArray *videoFrames = NULL;
 static NSUInteger currentFrameIndex = 0;
+static CIContext *sharedCIContext = NULL;
+static CVPixelBufferPoolRef pixelBufferPool = NULL;
+static size_t cachedWidth = 0;
+static size_t cachedHeight = 0;
+static NSObject *vcamLock = nil;
 
-static void loadReplacementMedia(void) {    
+static void createPixelBufferPool(size_t width, size_t height) {
+    if (pixelBufferPool && cachedWidth == width && cachedHeight == height) {
+        return;
+    }
+    
+    if (pixelBufferPool) {
+        CVPixelBufferPoolRelease(pixelBufferPool);
+        pixelBufferPool = NULL;
+    }
+    
+    NSDictionary *poolAttributes = @{
+        (NSString*)kCVPixelBufferPoolMinimumBufferCountKey: @3,
+        (NSString*)kCVPixelBufferPoolMaximumBufferAgeKey: @(5.0)
+    };
+    
+    NSDictionary *pixelBufferAttributes = @{
+        (NSString*)kCVPixelBufferCGImageCompatibilityKey: @YES,
+        (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (NSString*)kCVPixelBufferWidthKey: @(width),
+        (NSString*)kCVPixelBufferHeightKey: @(height),
+        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA)
+    };
+    
+    if (CVPixelBufferPoolCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)poolAttributes, (__bridge CFDictionaryRef)pixelBufferAttributes, &pixelBufferPool) == kCVReturnSuccess) {
+        cachedWidth = width;
+        cachedHeight = height;
+    }
+}
+
+static void loadReplacementMedia(void) {
+    if (!vcamLock) {
+        vcamLock = [[NSObject alloc] init];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:kReplacementMediaPath]) {
         return;
     }
     
     NSString *extension = [[kReplacementMediaPath pathExtension] lowercaseString];
     if ([extension isEqualToString:@"png"] || [extension isEqualToString:@"jpg"] || [extension isEqualToString:@"jpeg"]) {
-        // Image mode
         UIImage *image = [UIImage imageWithContentsOfFile:kReplacementMediaPath];
         if (image && image.CGImage) {
             replacementImage = CGImageRetain(image.CGImage);
             currentMode = VCamModeImage;
             resourcesLoaded = YES;
         } 
-        else {
-            NSLog(@"[vcam-debug] ERROR: Failed to load image");
-        }
     }
     else if ([extension isEqualToString:@"mp4"] || [extension isEqualToString:@"mov"]) {
-        // Video mode
         NSURL *videoURL = [NSURL fileURLWithPath:kReplacementMediaPath];
         AVAsset *asset = [AVAsset assetWithURL:videoURL];
         
         NSError *error = nil;
         AVAssetReader *assetReader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
         if (error) {
-            NSLog(@"[vcam-debug] ERROR: Could not create asset reader: %@", error);
             return;
         }
         
         NSArray *videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
         if (videoTracks.count == 0) {
-            NSLog(@"[vcam-debug] ERROR: No video tracks found");
             return;
         }
         
@@ -81,27 +94,24 @@ static void loadReplacementMedia(void) {
         AVAssetReaderTrackOutput *videoOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
         videoOutput.alwaysCopiesSampleData = NO;
         
-        if ([assetReader canAddOutput:videoOutput]) {
-            [assetReader addOutput:videoOutput];
+        if (![assetReader canAddOutput:videoOutput]) {
+            return;   
         }
-        else {
-            NSLog(@"[vcam-debug] ERROR: Could not add video output to asset reader");
-            return;
-        }
-        
+
+        [assetReader addOutput:videoOutput];
         [assetReader startReading];
         
         videoFrames = [[NSMutableArray alloc] init];
         int frameCount = 0;
-        
-        while (assetReader.status == AVAssetReaderStatusReading) {
+        int maxFrames = 60;
+        while (assetReader.status == AVAssetReaderStatusReading && frameCount < maxFrames) {
             CMSampleBufferRef sampleBuffer = [videoOutput copyNextSampleBuffer];
             if (sampleBuffer == NULL) {
                 break;
             }
 
             CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-            if (pixelBuffer != NULL) {
+            if (pixelBuffer) {
                 CVPixelBufferRetain(pixelBuffer);
                 [videoFrames addObject:(__bridge id)pixelBuffer];
                 frameCount++;
@@ -114,88 +124,97 @@ static void loadReplacementMedia(void) {
             currentMode = VCamModeVideo;
             resourcesLoaded = YES;
         }
-        else {
-            NSLog(@"[vcam-debug] ERROR: No frames extracted from video");
-            videoFrames = NULL;
-        }
-        
+
         [assetReader cancelReading];
+    }
+    
+    if (sharedCIContext == NULL) {
+        sharedCIContext = [CIContext context];
     }
 }
 
 static CVPixelBufferRef createPixelBufferForCurrentFrame(size_t width, size_t height) {
-    CVPixelBufferRef result = NULL;
-    
-    if (currentMode == VCamModeImage) {
-        NSDictionary *pixelBufferAttributes = @{
-            (NSString*)kCVPixelBufferCGImageCompatibilityKey: @YES,
-            (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
-            (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{}
-        };
+    @synchronized(vcamLock) {
+        CVPixelBufferRef result = NULL;
         
-        CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pixelBufferAttributes, &result);
-        if (status != kCVReturnSuccess) {
-            NSLog(@"[vcam-debug] Failed to create pixel buffer");
-            return NULL;
+        createPixelBufferPool(width, height);
+        
+        if (pixelBufferPool) {
+            if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pixelBufferPool, &result) != kCVReturnSuccess) {
+                return NULL;
+            }
         }
-        
-        CVPixelBufferLockBaseAddress(result, 0);
-        void *pxdata = CVPixelBufferGetBaseAddress(result);
-        CGColorSpaceRef rgbColorSpace = CGColorSpaceCreateDeviceRGB();
-        CGContextRef context = CGBitmapContextCreate(pxdata, width, height, 8, CVPixelBufferGetBytesPerRow(result), rgbColorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
-        
-        if (context) {
-            CGContextDrawImage(context, CGRectMake(0, 0, width, height), replacementImage);
-            CGContextRelease(context);
-        }
-        
-        CGColorSpaceRelease(rgbColorSpace);
-        CVPixelBufferUnlockBaseAddress(result, 0);
-        
-    } else if (currentMode == VCamModeVideo) {
-        CVPixelBufferRef videoFrame = (__bridge CVPixelBufferRef)videoFrames[currentFrameIndex];
-        currentFrameIndex = (currentFrameIndex + 1) % videoFrames.count;
-        
-        // Check if resize is needed
-        if (CVPixelBufferGetWidth(videoFrame) == width && CVPixelBufferGetHeight(videoFrame) == height) {
-            result = videoFrame;
-            CVPixelBufferRetain(result);
-        } else {
-            // Resize using Core Image
-            CIImage *sourceImage = [CIImage imageWithCVPixelBuffer:videoFrame];
-            
-            CGFloat scaleX = (CGFloat)width / CVPixelBufferGetWidth(videoFrame);
-            CGFloat scaleY = (CGFloat)height / CVPixelBufferGetHeight(videoFrame);
-            CGFloat scale = MIN(scaleX, scaleY);
-            
-            CGAffineTransform transform = CGAffineTransformMakeScale(scale, scale);
-            CIImage *scaledImage = [sourceImage imageByApplyingTransform:transform];
-            
+        else {
             NSDictionary *pixelBufferAttributes = @{
                 (NSString*)kCVPixelBufferCGImageCompatibilityKey: @YES,
                 (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
                 (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{}
             };
             
-            CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pixelBufferAttributes, &result);
-            
-            if (result) {
-                CIContext *context = [CIContext context];
-                [context render:scaledImage toCVPixelBuffer:result];
+            if (CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pixelBufferAttributes, &result) != kCVReturnSuccess) {
+                return NULL;
             }
         }
+        
+        if (currentMode == VCamModeImage) {
+            CVPixelBufferLockBaseAddress(result, 0);
+
+            void *pxdata = CVPixelBufferGetBaseAddress(result);
+            CGColorSpaceRef rgbColorSpace = CGColorSpaceCreateDeviceRGB();
+            CGContextRef context = CGBitmapContextCreate(pxdata, width, height, 8, CVPixelBufferGetBytesPerRow(result), rgbColorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+            if (context) {
+                CGContextDrawImage(context, CGRectMake(0, 0, width, height), replacementImage);
+                CGContextRelease(context);
+            }
+            
+            CGColorSpaceRelease(rgbColorSpace);
+            CVPixelBufferUnlockBaseAddress(result, 0);
+            
+        }
+        else if (currentMode == VCamModeVideo) {
+            CVPixelBufferRef videoFrame = (__bridge CVPixelBufferRef)videoFrames[currentFrameIndex];
+            currentFrameIndex = (currentFrameIndex + 1) % videoFrames.count;
+            
+            if (CVPixelBufferGetWidth(videoFrame) == width && CVPixelBufferGetHeight(videoFrame) == height) {
+                CVPixelBufferRelease(result);
+                result = videoFrame;
+                CVPixelBufferRetain(result);
+            }
+            else {
+                CIImage *sourceImage = [CIImage imageWithCVPixelBuffer:videoFrame];
+                
+                CGFloat scaleX = (CGFloat)width / CVPixelBufferGetWidth(videoFrame);
+                CGFloat scaleY = (CGFloat)height / CVPixelBufferGetHeight(videoFrame);
+                CGFloat scale = MIN(scaleX, scaleY);
+                CGAffineTransform transform = CGAffineTransformMakeScale(scale, scale);
+                CIImage *scaledImage = [sourceImage imageByApplyingTransform:transform];
+                
+                if (sharedCIContext) {
+                    [sharedCIContext render:scaledImage toCVPixelBuffer:result];
+                }
+            }
+        }
+        
+        return result;
     }
-    
-    return result;
 }
 
 %hook BWNodeOutput
 
 - (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
-    CVPixelBufferRef originalImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (self.mediaType == 'vide' && originalImageBuffer) {
-        
+    if (self.mediaType == 'soun') {
+        // could handle audio here
+    }
+    
+    if (self.mediaType == 'vide') {
+        CVPixelBufferRef originalImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+        if (originalImageBuffer == NULL) {
+            %orig(sampleBuffer);
+            return;
+        }
+
         if (!resourcesLoaded) {
+
             static dispatch_once_t onceToken;
             dispatch_once(&onceToken, ^{
                 loadReplacementMedia();
@@ -227,40 +246,6 @@ static CVPixelBufferRef createPixelBufferForCurrentFrame(size_t width, size_t he
                 OSStatus createStatus = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, replacementPixelBuffer, newFormatDescription, &timingInfo, &newSampleBuffer);
                 if (createStatus == kCVReturnSuccess && newSampleBuffer) {
                     CMPropagateAttachments(sampleBuffer, newSampleBuffer);
-                    
-                    CFArrayRef originalAttachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
-                    CFArrayRef newAttachments = CMSampleBufferGetSampleAttachmentsArray(newSampleBuffer, true);
-                    if (originalAttachments && CFArrayGetCount(originalAttachments) > 0) {
-                        if (newAttachments == NULL || CFArrayGetCount(newAttachments) == 0) {
-                            CMSampleBufferSetDataReady(newSampleBuffer);
-                            newAttachments = CMSampleBufferGetSampleAttachmentsArray(newSampleBuffer, true);
-                        }
-                        
-                        if (newAttachments && CFArrayGetCount(newAttachments) > 0) {
-                            CFDictionaryRef oldDict = (CFDictionaryRef)CFArrayGetValueAtIndex(originalAttachments, 0);
-                            CFMutableDictionaryRef newDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(newAttachments, 0);
-                            
-                            if (oldDict && newDict) {
-                                CFDictionaryRef immutableCopy = CFDictionaryCreateCopy(kCFAllocatorDefault, oldDict);
-                                if (immutableCopy) {
-                                    CFIndex count = CFDictionaryGetCount(immutableCopy);
-                                    if (count > 0) {
-                                        const void **keys = (const void **)malloc(sizeof(void*) * count);
-                                        const void **values = (const void **)malloc(sizeof(void*) * count);
-                                        CFDictionaryGetKeysAndValues(immutableCopy, keys, values);
-                                        
-                                        for (CFIndex i = 0; i < count; i++) {
-                                            CFDictionarySetValue(newDict, keys[i], values[i]);
-                                        }
-                                        
-                                        free(keys);
-                                        free(values);
-                                    }
-                                    CFRelease(immutableCopy);
-                                }
-                            }
-                        }
-                    }
                     
                     %orig(newSampleBuffer);
                     CFRelease(newSampleBuffer);

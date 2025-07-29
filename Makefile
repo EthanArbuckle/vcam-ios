@@ -9,6 +9,6 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = vcam
 
 vcam_FILES = Tweak.xm
-vcam_CFLAGS = -fobjc-arc
+vcam_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 
 include $(THEOS_MAKE_PATH)/tweak.mk
