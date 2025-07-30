@@ -1,8 +1,5 @@
 {
 	Filter = {
-		Bundles = (
-			"com.apple.mediaserverd",
-		);
 		Executables = (
 			"/usr/sbin/mediaserverd",
 			mediaserverd,

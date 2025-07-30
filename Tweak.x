@@ -2,22 +2,33 @@
 
 %hook BWNodeOutput
 
-- (void)emitSampleBuffer:(CMSampleBufferRef)arg1 {
+- (void)emitSampleBuffer:(CMSampleBufferRef)sampleBuffer {
     unsigned int mediaType = ((unsigned int (*)(id, SEL))objc_msgSend)(self, sel_registerName("mediaType"));
-    if (mediaType == 'vide') {
-        
-        CMSampleBufferRef newSampleBuffer = createModifiedSampleBuffer(arg1);
-        if (newSampleBuffer) {
-            %orig(newSampleBuffer);
-            CFRelease(newSampleBuffer);
-
-            return;
-        }
+    if (mediaType != 'vide') {
+        %orig(sampleBuffer);
+        return;
     }
 
-    // could also handle audio here, when mediaType='soun'
+    CVPixelBufferRef originalImageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (originalImageBuffer == NULL) {
+        %orig(sampleBuffer);
+        return;
+    }
 
-    %orig(arg1);
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        loadReplacementMedia();
+    });
+
+    @try {
+        CVPixelBufferLockBaseAddress(originalImageBuffer, 0);
+        drawReplacementOntoBuffer(originalImageBuffer);
+    }
+    @finally {
+        CVPixelBufferUnlockBaseAddress(originalImageBuffer, 0);
+    }
+
+    %orig(sampleBuffer);
 }
 
 %end

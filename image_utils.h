@@ -1,3 +1,4 @@
 #import <CoreMedia/CoreMedia.h>
 
-CMSampleBufferRef createModifiedSampleBuffer(CMSampleBufferRef originalSampleBuffer);
+void loadReplacementMedia(void);
+void drawReplacementOntoBuffer(CVPixelBufferRef targetBuffer);
